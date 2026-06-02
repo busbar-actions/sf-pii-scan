@@ -20,7 +20,7 @@ inputs:
     default: 'critical'
 
   config-file:
-    description: 'Path to a ValidationConfig YAML (custom patterns, skip lists, entropy thresholds, etc.). Optional.'
+    description: 'Path to a ValidationConfig JSON (custom patterns, skip lists, entropy thresholds, etc.). Optional.'
     required: false
     default: ''
 
@@ -55,7 +55,7 @@ inputs:
     default: 'pii-findings'
 
   version:
-    description: 'sf-pii-scan release tag to download (e.g. v0.4.2). "latest" resolves the most recent release.'
+    description: 'sf-pii-scan release tag to download (e.g. v0.1.0). "latest" resolves the most recent release.'
     required: false
     default: 'latest'
   binary-repo:
@@ -86,128 +86,44 @@ outputs:
     description: 'Path to the SARIF report (empty if sarif=false).'
     value: ${{ steps.scan.outputs.sarif-path }}
 
+# The binary owns all logic and UX: it reads its inputs from INPUT_*, computes
+# the finding counts, writes GITHUB_OUTPUT, the step summary, annotations and the
+# PR-comment body, and exits non-zero when the fail-on threshold is breached.
+# This action only installs it, passes inputs through, and wires the three
+# GitHub-native publish steps (Code Scanning, artifact, PR comment).
 runs:
   using: 'composite'
   steps:
-    - name: Resolve release tag
-      id: tag
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [[ "${{ inputs.version }}" == "latest" ]]; then
-          tag=$(gh release view --repo "${{ inputs.binary-repo }}" --json tagName -q .tagName)
-        else
-          tag="${{ inputs.version }}"
-        fi
-        echo "tag=$tag" >> "$GITHUB_OUTPUT"
-      env:
-        GH_TOKEN: ${{ github.token }}
-
-    - name: Determine asset name
-      id: asset
-      shell: bash
-      run: |
-        set -euo pipefail
-        os="${{ runner.os }}"
-        arch="${{ runner.arch }}"
-        case "$os-$arch" in
-          Linux-X64)   name="sf-pii-scan-x86_64-unknown-linux-gnu" ;;
-          Linux-ARM64) name="sf-pii-scan-aarch64-unknown-linux-gnu" ;;
-          macOS-X64)   name="sf-pii-scan-x86_64-apple-darwin" ;;
-          macOS-ARM64) name="sf-pii-scan-aarch64-apple-darwin" ;;
-          Windows-X64) name="sf-pii-scan-x86_64-pc-windows-msvc.exe" ;;
-          *) echo "::error::Unsupported runner: $os-$arch"; exit 1 ;;
-        esac
-        echo "name=$name" >> "$GITHUB_OUTPUT"
-
-    - name: Download sf-pii-scan binary
-      shell: bash
-      run: |
-        set -euo pipefail
-        bin_dir="${RUNNER_TEMP}/sf-pii-scan"
-        mkdir -p "$bin_dir"
-        gh release download "${{ steps.tag.outputs.tag }}" \
-          --repo "${{ inputs.binary-repo }}" \
-          --pattern "${{ steps.asset.outputs.name }}" \
-          --dir "$bin_dir"
-        bin_path="$bin_dir/${{ steps.asset.outputs.name }}"
-        chmod +x "$bin_path"
-        echo "$bin_dir" >> "$GITHUB_PATH"
-        if [[ "$bin_path" != "$bin_dir/sf-pii-scan" && "$bin_path" != "$bin_dir/sf-pii-scan.exe" ]]; then
-          ext=""
-          [[ "${{ runner.os }}" == "Windows" ]] && ext=".exe"
-          ln -sf "$bin_path" "$bin_dir/sf-pii-scan$ext"
-        fi
-      env:
-        GH_TOKEN: ${{ github.token }}
+    - name: Set up sf-pii-scan
+      uses: busbar-actions/setup@main
+      with:
+        binary: sf-pii-scan
+        version: ${{ inputs.version }}
+        binary-repo: ${{ inputs.binary-repo }}
 
     - name: Run PII scan
       id: scan
       shell: bash
-      run: |
-        set -euo pipefail
-        args=(data scan
-          --input "${{ inputs.input-path }}"
-          --severity "${{ inputs.severity-threshold }}"
-          --output "${{ inputs.report-path }}"
-          --format json)
-
-        if [[ "${{ inputs.sarif }}" == "true" ]]; then
-          args+=(--sarif "${{ inputs.sarif-path }}")
-        fi
-        if [[ -n "${{ inputs.config-file }}" ]]; then
-          args+=(--config "${{ inputs.config-file }}")
-        fi
-        if [[ "${{ inputs.fail-on-severity }}" != "never" ]]; then
-          args+=(--fail-on "${{ inputs.fail-on-severity }}")
-        fi
-
-        # Run the scan. Capture exit status without aborting so we can publish
-        # the report even when the threshold is breached.
-        set +e
-        sf-pii-scan "${args[@]}"
-        scan_exit=$?
-        set -e
-
-        # Parse counts from the JSON report.
-        if [[ -f "${{ inputs.report-path }}" ]]; then
-          total=$(jq 'length' "${{ inputs.report-path }}")
-          crit=$(jq '[.[] | select(.severity == "critical")] | length' "${{ inputs.report-path }}")
-          high=$(jq '[.[] | select(.severity == "high")] | length' "${{ inputs.report-path }}")
-          med=$(jq '[.[] | select(.severity == "medium")] | length' "${{ inputs.report-path }}")
-        else
-          total=0; crit=0; high=0; med=0
-        fi
-
-        echo "findings-count=$total" >> "$GITHUB_OUTPUT"
-        echo "critical-count=$crit" >> "$GITHUB_OUTPUT"
-        echo "high-count=$high"     >> "$GITHUB_OUTPUT"
-        echo "medium-count=$med"    >> "$GITHUB_OUTPUT"
-
-        if [[ "${{ inputs.sarif }}" == "true" ]]; then
-          echo "sarif-path=${{ inputs.sarif-path }}" >> "$GITHUB_OUTPUT"
-        else
-          echo "sarif-path=" >> "$GITHUB_OUTPUT"
-        fi
-
-        if [[ $scan_exit -ne 0 ]]; then
-          echo "threshold-breached=true" >> "$GITHUB_OUTPUT"
-        else
-          echo "threshold-breached=false" >> "$GITHUB_OUTPUT"
-        fi
-
-        # Stash the exit code for the final gate.
-        echo "$scan_exit" > "${RUNNER_TEMP}/scan_exit"
+      env:
+        INPUT_INPUT_PATH: ${{ inputs.input-path }}
+        INPUT_SEVERITY_THRESHOLD: ${{ inputs.severity-threshold }}
+        INPUT_FAIL_ON_SEVERITY: ${{ inputs.fail-on-severity }}
+        INPUT_CONFIG_FILE: ${{ inputs.config-file }}
+        INPUT_REPORT_PATH: ${{ inputs.report-path }}
+        INPUT_SARIF: ${{ inputs.sarif }}
+        INPUT_SARIF_PATH: ${{ inputs.sarif-path }}
+        INPUT_COMMENT_OUTPUT: ${{ runner.temp }}/pii-comment.md
+      run: sf-pii-scan
 
     - name: Upload SARIF to Code Scanning
-      if: inputs.sarif == 'true' && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif-path != ''
+      if: always() && inputs.sarif == 'true' && inputs.upload-sarif == 'true' && steps.scan.outputs.sarif-path != ''
       uses: github/codeql-action/upload-sarif@v3
       with:
         sarif_file: ${{ steps.scan.outputs.sarif-path }}
         category: busbar-pii-scan
 
     - name: Upload findings artifact
-      if: inputs.upload-artifact == 'true'
+      if: always() && inputs.upload-artifact == 'true'
       uses: actions/upload-artifact@v4
       with:
         name: ${{ inputs.artifact-name }}
@@ -217,46 +133,11 @@ runs:
         if-no-files-found: ignore
 
     - name: Post PR comment
-      if: inputs.comment-pr == 'true' && github.event_name == 'pull_request'
+      if: always() && inputs.comment-pr == 'true' && github.event_name == 'pull_request'
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
-        REPORT: ${{ inputs.report-path }}
-        TOTAL: ${{ steps.scan.outputs.findings-count }}
-        CRIT: ${{ steps.scan.outputs.critical-count }}
-        HIGH: ${{ steps.scan.outputs.high-count }}
-        MED:  ${{ steps.scan.outputs.medium-count }}
       run: |
         set -euo pipefail
-        if [[ "$TOTAL" == "0" ]]; then
-          body=$'### 🛡️ busbar pii-scan\n\nNo findings at or above the configured severity threshold.'
-        else
-          # Group counts by category for the summary table.
-          rows=$(jq -r '
-            group_by(.category)
-            | map({category: .[0].category, count: length})
-            | sort_by(-.count)
-            | .[]
-            | "| \(.category) | \(.count) |"
-          ' "$REPORT" || true)
-
-          body="### 🛡️ busbar pii-scan
-
-**$TOTAL findings** — Critical: $CRIT · High: $HIGH · Medium: $MED
-
-| Category | Count |
-|---|---|
-$rows
-
-Full report attached as the \`${{ inputs.artifact-name }}\` workflow artifact."
-        fi
-
-        gh pr comment "${{ github.event.pull_request.number }}" --body "$body"
-
-    - name: Gate on threshold
-      if: steps.scan.outputs.threshold-breached == 'true'
-      shell: bash
-      run: |
-        set -euo pipefail
-        echo "::error::PII scan threshold breached (fail-on-severity=${{ inputs.fail-on-severity }})."
-        exit "$(cat "${RUNNER_TEMP}/scan_exit")"
+        gh pr comment "${{ github.event.pull_request.number }}" \
+          --body-file "${RUNNER_TEMP}/pii-comment.md"
