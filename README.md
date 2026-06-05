@@ -1,50 +1,25 @@
+> [!WARNING]
+> **`busbar-actions` is under heavy active development — expect breaking changes.**
+> These repositories are public, but **not ready for use yet** — please don't depend on them.
+> A pilot is starting soon: **[star and watch the busbar-actions organization](https://github.com/busbar-actions)** for the launch of Discussions and the pilot announcement.
+
 # busbar-actions/sf-pii-scan
 
-Scan extracted Salesforce datasets for PII and secrets. Emits a JSON findings report, a SARIF report for GitHub Code Scanning, and a PR comment summary.
+Scan a captured Salesforce dataset for PII and credentials. Emits a JSON findings report, an optional SARIF report for GitHub Code Scanning, and an optional PR-comment summary.
 
-Built around the `sf-datasets` validator: catches SSN, email, phone, credit card, DOB, IP, passport, driver's license, bank account, medical ID; AWS / Stripe / GitHub / Slack / SendGrid / Twilio keys; private keys, OAuth tokens, database URLs, password fields; plus high-entropy strings as a generic secrets net.
+Built on the `sf-datasets` `DataValidator`: catches SSN, email, phone, credit card, DOB, IP, passport, driver's license, bank account, and medical IDs; AWS / Stripe / GitHub / Slack / SendGrid / Twilio keys; private keys, OAuth tokens, database URLs, password fields; Salesforce-credential detectors (SFDX auth URL, session/access tokens, OAuth refresh tokens); plus high-entropy strings as a generic secrets net.
+
+**No org auth required** — this action scans files on disk only. It never contacts Salesforce.
 
 ## What it does
 
-Wraps `busbar-sf data scan` over a file or directory of CSVs (typically the output of `busbar-sf data capture` or `data extract`). For each finding:
+Loads a dataset *directory* (the output of `busbar-sf data capture` / `data extract`) and validates every text value. The loader auto-detects the storage format: a directory containing `manifest.json` is read as CSV storage, otherwise it is read as the binary (sled) storage. It is not a recursive CSV walker — point it at a capture directory, not an arbitrary tree of CSVs.
 
-- Categorises it (e.g. `email`, `aws_access_key`, `high_entropy`).
-- Assigns a severity (`info` / `low` / `medium` / `high` / `critical`).
-- Records the SObject, field, and a *redacted* snippet of the match.
+For each finding the binary records its category (e.g. `email`, `aws_access_key`, `high_entropy`), severity (`info` / `low` / `medium` / `high` / `critical`), the SObject, field, and a redacted snippet of the match.
 
-The action then publishes the report three ways: workflow artifact, GitHub Code Scanning (SARIF), and a PR comment summary.
+The single `sf-pii-scan` binary owns all logic and UX. Under `GITHUB_ACTIONS=true` it reads its `INPUT_*` contract, writes the JSON report (and SARIF), computes the finding counts, writes `GITHUB_OUTPUT`, a job-summary table, an annotation, and a PR-comment body, and exits non-zero when the `fail-on-severity` threshold is breached. The action itself only installs the binary, passes inputs through, and wires the three GitHub-native publish steps (Code Scanning upload, artifact upload, PR comment).
 
-## Inputs
-
-| Input | Required | Default | Description |
-|---|---|---|---|
-| `input-path` | yes | — | File or directory to scan. Directories are walked for CSVs. |
-| `severity-threshold` | no | `medium` | Drop findings below this severity. One of `info`, `low`, `medium`, `high`, `critical`. |
-| `fail-on-severity` | no | `critical` | Fail the workflow if any finding meets or exceeds this severity. Set to `never` to disable. |
-| `config-file` | no | `` | Path to a `ValidationConfig` YAML (custom patterns, skip lists, entropy thresholds). |
-| `report-path` | no | `pii-findings.json` | Where to write the JSON findings report. |
-| `sarif` | no | `true` | Also emit a SARIF report. |
-| `sarif-path` | no | `pii-findings.sarif` | Where the SARIF goes. |
-| `upload-sarif` | no | `true` | Upload SARIF to GitHub Code Scanning (requires `security-events: write`). |
-| `comment-pr` | no | `true` | Post a summary comment on pull_request events. |
-| `upload-artifact` | no | `true` | Upload JSON (and SARIF) as a workflow artifact. |
-| `artifact-name` | no | `pii-findings` | Artifact name. |
-| `version` | no | `latest` | `busbar-sf` release tag. |
-| `binary-repo` | no | `busbar-actions/actions-dist` | Where to fetch the binary from. |
-
-## Outputs
-
-| Output | Description |
-|---|---|
-| `findings-count` | Total findings at or above `severity-threshold`. |
-| `critical-count` | Critical findings. |
-| `high-count` | High findings. |
-| `medium-count` | Medium findings. |
-| `threshold-breached` | `"true"` if `fail-on-severity` was met. |
-| `report-path` | Path to the JSON report. |
-| `sarif-path` | Path to the SARIF (empty if `sarif=false`). |
-
-## Example: scan extracted dataset on PR
+## Usage
 
 ```yaml
 name: PII Scan
@@ -56,8 +31,8 @@ on:
 
 permissions:
   contents: read
-  pull-requests: write
-  security-events: write
+  pull-requests: write      # only if comment-pr (default true)
+  security-events: write    # only if upload-sarif (default true)
 
 jobs:
   scan:
@@ -67,84 +42,82 @@ jobs:
 
       - uses: busbar-actions/sf-pii-scan@v1
         with:
-          input-path: data/extracts
+          input-path: data/extracts   # a capture/extract directory
           severity-threshold: medium
           fail-on-severity: critical
 ```
 
-## Example: scan after capture (chained)
+## Inputs
+
+| Input | Required | Default | Description |
+|---|---|---|---|
+| `input-path` | yes | — | Captured dataset directory to scan (CSV storage with `manifest.json`, or binary/sled storage). |
+| `severity-threshold` | no | `medium` | Minimum severity to include in the report. One of `info`, `low`, `medium`, `high`, `critical`. |
+| `fail-on-severity` | no | `critical` | Exit non-zero if any finding meets or exceeds this severity. Same scale; set to `never` to disable. |
+| `config-file` | no | `` | Path to a `ValidationConfig` **JSON** file (custom patterns, skip lists, entropy thresholds). Optional. |
+| `report-path` | no | `pii-findings.json` | Where to write the JSON findings report. |
+| `sarif` | no | `true` | Also emit a SARIF v2.1.0 report. |
+| `sarif-path` | no | `pii-findings.sarif` | Where to write the SARIF report (only used when `sarif=true`). |
+| `upload-sarif` | no | `true` | Upload the SARIF to GitHub Code Scanning (requires `security-events: write`). |
+| `comment-pr` | no | `true` | Post a findings summary as a PR comment on `pull_request` events (requires `pull-requests: write`). |
+| `upload-artifact` | no | `true` | Upload the JSON report (and SARIF if generated) as a workflow artifact. |
+| `artifact-name` | no | `pii-findings` | Name for the uploaded artifact. |
+| `version` | no | `latest` | `sf-pii-scan` release tag to download (e.g. `v0.1.0`). `latest` resolves the most recent release. |
+| `binary-repo` | no | `busbar-actions/actions-dist` | GitHub repo that publishes the `sf-pii-scan` binary releases. |
+
+## Outputs
+
+| Output | Description |
+|---|---|
+| `findings-count` | Total findings at or above `severity-threshold`. |
+| `critical-count` | Number of Critical-severity findings. |
+| `high-count` | Number of High-severity findings. |
+| `medium-count` | Number of Medium-severity findings. |
+| `threshold-breached` | `"true"` if any finding met or exceeded `fail-on-severity`. |
+| `report-path` | Path to the JSON findings report (echoes the `report-path` input). |
+| `sarif-path` | Path to the SARIF report (empty if `sarif=false`). |
+
+## Auth / permissions model
+
+This action does **not** consume a Salesforce access token and does **not** request `id-token: write` — it reads files that a prior capture/extract step wrote to the workspace. No OIDC trust onboarding is required.
+
+The permissions it does need are GitHub-side, and only for the publish steps:
+
+- `security-events: write` — to upload SARIF to Code Scanning (`upload-sarif`, default true).
+- `pull-requests: write` — to post the PR comment (`comment-pr`, default true).
+- `contents: read` — to check out the repository.
+
+If you disable `upload-sarif` and `comment-pr`, `contents: read` is sufficient.
+
+## Chaining with a capture step
+
+`input-path` expects a dataset directory produced upstream. Until a `busbar-actions/sf-capture` action exists, capture with the binary directly. Capture is the step that needs Salesforce credentials (via the OIDC token-exchange model); the scan step that follows does not.
 
 ```yaml
-name: Capture + Scan
+- uses: actions/checkout@v4
 
-on:
-  workflow_dispatch:
-    inputs:
-      sobjects:
-        description: 'Comma-separated SObjects to capture'
-        required: true
-        default: 'Account,Contact,Lead'
+- name: Capture data        # this step authenticates to SF; the scan does not
+  run: |
+    busbar-sf data capture --sobjects "Account,Contact,Lead" --output ./captured
 
-permissions:
-  contents: read
-  pull-requests: write
-  security-events: write
-
-jobs:
-  capture-and-scan:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Capture data
-        env:
-          SF_ACCESS_TOKEN: ${{ secrets.SF_ACCESS_TOKEN }}
-          SF_INSTANCE_URL: ${{ secrets.SF_INSTANCE_URL }}
-        run: |
-          # Direct binary use until a busbar-actions/sf-capture action exists.
-          busbar-sf data capture \
-            --sobjects "${{ inputs.sobjects }}" \
-            --output ./captured
-
-      - uses: busbar-actions/sf-pii-scan@v1
-        with:
-          input-path: ./captured
-          severity-threshold: low      # be noisy during dev
-          fail-on-severity: critical
+- uses: busbar-actions/sf-pii-scan@v1
+  with:
+    input-path: ./captured
+    severity-threshold: low     # be noisy during dev
+    fail-on-severity: critical
 ```
 
-## Example: custom validation config
+## Custom validation config
 
 ```yaml
 - uses: busbar-actions/sf-pii-scan@v1
   with:
-    input-path: data/extracts
-    config-file: .busbar/pii-scan.yml
+    input-path: ./captured
+    config-file: .busbar/pii-scan.json
 ```
 
-Where `.busbar/pii-scan.yml` is a [`ValidationConfig`](https://github.com/busbar-agency/busbar-extensions/blob/main/crates/sf-datasets/src/pipeline/validator.rs) YAML — toggles, custom patterns, skip lists, and entropy thresholds.
+`config-file` is a [`ValidationConfig`](https://github.com/busbar-agency/busbar-extensions/blob/main/crates/sf-datasets/src/pipeline/validator.rs) **JSON** document (the binary parses it with `serde_json`) — toggles, custom patterns, skip lists, and entropy thresholds. The action's `severity-threshold` overrides the config's `min_severity`.
 
-## Dependencies (current status)
+## Observability
 
-This action is fully scaffolded but **not yet runnable end-to-end**. Two upstream pieces need to land first:
-
-1. **`busbar-sf data scan` subcommand** — the validator at `crates/sf-datasets/src/pipeline/validator.rs` is library-only today. We need a CLI surface that reads CSVs (single file or recursive dir), scans them with `DataValidator`, optionally loads a YAML `ValidationConfig`, and writes:
-   - JSON: `[Finding, ...]` (the existing serde representation).
-   - SARIF: `Finding` mapped to a SARIF v2.1.0 result — category → ruleId, severity → level, field+sobject → location, snippet → message text. One file per scanned source becomes a `physicalLocation`.
-   - Exit code: non-zero when `--fail-on <severity>` is met or exceeded.
-
-   Suggested flags:
-   ```
-   busbar-sf data scan \
-     --input <file-or-dir> \
-     [--config <validation-config.yml>] \
-     [--severity <min-to-include>] \
-     [--output <findings.json>] \
-     [--format json|sarif|both] \
-     [--sarif <findings.sarif>] \
-     [--fail-on <severity>]
-   ```
-
-2. **Binary publication to `busbar-actions/actions-dist`** — same dependency as `busbar-actions/sf-schema`. A release pipeline in `busbar-extensions` that builds `busbar-sf` for five targets and pushes them to `actions-dist` releases under the asset names this action expects (see `action.yml` → "Determine asset name").
-
-Once both land, tag this action `v1` and consumers can pin it.
+The binary routes its action outputs, job-summary table, annotation, and SARIF/JSON reports through the shared `github-actions-ux` reporter, so results land in the Job Summary and as workflow annotations automatically. The fail-on breach is surfaced as an `::error` annotation and a non-zero exit; sub-threshold findings as a `::warning`; a clean scan as a `::notice`.
